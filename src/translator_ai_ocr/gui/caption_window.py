@@ -24,17 +24,17 @@ class CaptionWindow(QWidget):
     settings_requested = Signal()
     hide_requested = Signal()  # close button -> hide to tray
     quit_requested = Signal()
+    pause_toggled = Signal(bool)
+    copy_requested = Signal()
+    history_requested = Signal()
 
     def __init__(self, config):
         super().__init__()
         self._config = config
         self._drag_pos: QPoint | None = None
+        self._always_on_top = True
 
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool
-        )
+        self._apply_window_flags()
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.setMinimumSize(MIN_WIDTH, MIN_HEIGHT)
@@ -42,6 +42,12 @@ class CaptionWindow(QWidget):
         self._setup_ui()
         self._apply_style()
         self._restore_geometry()
+
+    def _apply_window_flags(self):
+        flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
+        if self._always_on_top:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
 
     # ---------- UI ----------
 
@@ -79,13 +85,29 @@ class CaptionWindow(QWidget):
 
         self._settings_btn = self._tool_button("⚙", "Settings")  # gear
         self._settings_btn.clicked.connect(self.settings_requested.emit)
-        self._hide_btn = self._tool_button("─", "Hide to tray")  # minus
-        self._hide_btn.clicked.connect(self.hide_requested.emit)
         self._close_btn = self._tool_button("✕", "Hide to tray (right-click tray icon to quit)")
         self._close_btn.clicked.connect(self.hide_requested.emit)
 
+        self._pause_btn = self._tool_button("⏸", "Pause / resume translation")
+        self._pause_btn.setCheckable(True)
+        self._pause_btn.toggled.connect(self._on_pause_toggled)
+
+        self._pin_btn = self._tool_button("📌", "Always on top (toggle)")
+        self._pin_btn.setCheckable(True)
+        self._pin_btn.setChecked(True)
+        self._pin_btn.toggled.connect(self._on_pin_toggled)
+
+        self._copy_btn = self._tool_button("⧉", "Copy latest translation")
+        self._copy_btn.clicked.connect(self.copy_requested.emit)
+
+        self._history_btn = self._tool_button("≡", "Translation history")
+        self._history_btn.clicked.connect(self.history_requested.emit)
+
         btn_col.addWidget(self._close_btn)
-        btn_col.addWidget(self._hide_btn)
+        btn_col.addWidget(self._pause_btn)
+        btn_col.addWidget(self._pin_btn)
+        btn_col.addWidget(self._copy_btn)
+        btn_col.addWidget(self._history_btn)
         btn_col.addWidget(self._settings_btn)
         btn_col.addStretch()
 
@@ -156,6 +178,23 @@ class CaptionWindow(QWidget):
         self._config.caption_x = self.x()
         self._config.caption_y = self.y()
         self._config.caption_width = self.width()
+
+    # ---------- button handlers ----------
+
+    def _on_pause_toggled(self, checked: bool):
+        self._pause_btn.setText("▶" if checked else "⏸")
+        self.pause_toggled.emit(checked)
+
+    def _on_pin_toggled(self, checked: bool):
+        self._always_on_top = checked
+        was_visible = self.isVisible()
+        self._apply_window_flags()
+        if was_visible:
+            self.show()
+
+    def set_paused(self, paused: bool):
+        """Sync the pause button state (e.g. from the tray menu)."""
+        self._pause_btn.setChecked(paused)
 
     # ---------- content ----------
 

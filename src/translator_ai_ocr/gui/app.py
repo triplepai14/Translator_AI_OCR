@@ -2,16 +2,20 @@
 
 import signal
 import sys
+from collections import deque
 from pathlib import Path
 
 from PySide6.QtCore import QTimer
-from PySide6.QtGui import QAction, QIcon
+from PySide6.QtGui import QAction, QGuiApplication, QIcon
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from .. import __version__, log
 from ..config import AppMode, Config, OverlayMode
+from ..engines import create_engine
+from ..livecaptions import set_live_captions_visible
 from ..overlay import InplaceOverlay
 from .caption_window import CaptionWindow
+from .history_dialog import HistoryDialog, TranslationHistory
 from .livecaptions_worker import LiveCaptionsWorker
 from .ocr_controller import OcrController
 from .settings_dialog import SettingsDialog
@@ -45,6 +49,16 @@ class TranslatorApp:
         self._caption = CaptionWindow(config)
         self._caption.hide_requested.connect(self._hide_to_tray)
         self._caption.settings_requested.connect(self._show_settings)
+        self._caption.pause_toggled.connect(self._on_pause_toggled)
+        self._caption.copy_requested.connect(self._copy_latest)
+        self._caption.history_requested.connect(self._show_history)
+
+        # Translation history + recent-sentences display buffer
+        self._history = TranslationHistory()
+        self._history_dialog: HistoryDialog | None = None
+        self._recent_translations: deque[str] = deque(maxlen=config.overlay_sentences)
+        self._paused = False
+        self._lc_running_key: tuple | None = None
 
         # Inplace overlay (Screen OCR mode)
         self._inplace_overlay = InplaceOverlay(
@@ -70,11 +84,23 @@ class TranslatorApp:
         menu = QMenu()
         show_action = QAction("Show / Hide", menu)
         show_action.triggered.connect(self._toggle_visible)
+        self._pause_action = QAction("Pause translation", menu)
+        self._pause_action.setCheckable(True)
+        self._pause_action.toggled.connect(self._caption.set_paused)
+        self._show_lc_action = QAction("Show Live Captions window", menu)
+        self._show_lc_action.setCheckable(True)
+        self._show_lc_action.setChecked(config.show_live_captions)
+        self._show_lc_action.toggled.connect(self._on_show_lc_toggled)
+        history_action = QAction("Translation history...", menu)
+        history_action.triggered.connect(self._show_history)
         settings_action = QAction("Settings...", menu)
         settings_action.triggered.connect(self._show_settings)
         quit_action = QAction("Quit", menu)
         quit_action.triggered.connect(self._quit)
         menu.addAction(show_action)
+        menu.addAction(self._pause_action)
+        menu.addAction(self._show_lc_action)
+        menu.addAction(history_action)
         menu.addAction(settings_action)
         menu.addSeparator()
         menu.addAction(quit_action)
@@ -93,11 +119,23 @@ class TranslatorApp:
         if mode == AppMode.LIVE_CAPTIONS:
             self._caption.set_translation("")
             self._caption.set_status("Starting Live Captions mode...")
-            self._lc_worker = LiveCaptionsWorker(
-                source_lang=self._config.lc_source, target_lang=self._config.lc_target
+            self._recent_translations = deque(
+                self._recent_translations, maxlen=self._config.overlay_sentences
             )
+            try:
+                engine = create_engine(self._config)
+            except Exception as e:
+                self._caption.set_status(f"Engine error: {str(e)[:100]}")
+                return
+            self._lc_running_key = (
+                self._config.translation_engine,
+                self._config.lc_source,
+                self._config.lc_target,
+            )
+            self._lc_worker = LiveCaptionsWorker(engine, source_lang=self._config.lc_source)
+            self._lc_worker.paused = self._paused
             self._lc_worker.original_changed.connect(self._caption.set_original)
-            self._lc_worker.translation_ready.connect(self._caption.set_translation)
+            self._lc_worker.translation_ready.connect(self._on_translation_ready)
             self._lc_worker.status_changed.connect(self._on_lc_status)
             self._lc_worker.start()
         else:
@@ -121,10 +159,29 @@ class TranslatorApp:
             "running": "",  # transcript will replace this
             "stopped": "",
         }
+        if status == "needs_setup":
+            # The user must see the window to click the consent buttons
+            set_live_captions_visible(True)
+        elif status == "running" and not self._config.show_live_captions:
+            set_live_captions_visible(False)
         if status.startswith("error:"):
             self._caption.set_status(f"Error: {status[6:][:120]}")
         elif messages.get(status):
             self._caption.set_status(messages[status])
+
+    def _on_translation_ready(self, original: str, translated: str):
+        self._history.add(original, translated)
+        if self._history_dialog and self._history_dialog.isVisible():
+            self._history_dialog.refresh()
+        # If this is the same sentence grown longer (partial -> complete),
+        # replace the last line instead of appending a near-duplicate.
+        last = getattr(self, "_last_original", None)
+        if self._recent_translations and last and (original.startswith(last) or last.startswith(original)):
+            self._recent_translations[-1] = translated
+        else:
+            self._recent_translations.append(translated)
+        self._last_original = original
+        self._caption.set_translation("\n".join(self._recent_translations))
 
     def _on_ocr_status(self, status: str):
         if status == "loading":
@@ -148,6 +205,9 @@ class TranslatorApp:
             s = self._settings
             s.mode_changed.connect(self._start_mode)
             s.lc_pair_changed.connect(self._on_lc_pair_changed)
+            s.lc_engine_changed.connect(self._restart_lc_if_needed)
+            s.show_live_captions_changed.connect(self._on_show_lc_toggled)
+            s.overlay_sentences_changed.connect(self._on_overlay_sentences_changed)
             s.ocr_direction_changed.connect(self._on_ocr_direction_changed)
             s.overlay_mode_changed.connect(self._on_overlay_mode_changed)
             s.vertical_text_changed.connect(self._on_vertical_text_changed)
@@ -162,12 +222,47 @@ class TranslatorApp:
         self._settings.activateWindow()
 
     def _on_lc_pair_changed(self, source: str, target: str):
-        if (source, target) == (self._config.lc_source, self._config.lc_target):
-            return
         self._config.lc_source = source
         self._config.lc_target = target
-        if self._config.app_mode == AppMode.LIVE_CAPTIONS:
-            self._start_mode(AppMode.LIVE_CAPTIONS)  # restart with new languages
+        self._restart_lc_if_needed()
+
+    def _restart_lc_if_needed(self):
+        """Restart Live Captions mode only if engine/languages actually changed."""
+        if self._config.app_mode != AppMode.LIVE_CAPTIONS:
+            return
+        key = (self._config.translation_engine, self._config.lc_source, self._config.lc_target)
+        if key != self._lc_running_key:
+            self._start_mode(AppMode.LIVE_CAPTIONS)
+
+    def _on_pause_toggled(self, paused: bool):
+        self._paused = paused
+        if self._lc_worker is not None:
+            self._lc_worker.paused = paused
+        self._pause_action.setChecked(paused)
+        if paused:
+            self._caption.set_status("Paused")
+
+    def _on_show_lc_toggled(self, show: bool):
+        self._config.show_live_captions = show
+        self._show_lc_action.setChecked(show)
+        set_live_captions_visible(show)
+
+    def _on_overlay_sentences_changed(self, count: int):
+        self._config.overlay_sentences = count
+        self._recent_translations = deque(self._recent_translations, maxlen=count)
+        self._caption.set_translation("\n".join(self._recent_translations))
+
+    def _copy_latest(self):
+        if self._recent_translations:
+            QGuiApplication.clipboard().setText(self._recent_translations[-1])
+
+    def _show_history(self):
+        if self._history_dialog is None:
+            self._history_dialog = HistoryDialog(self._history)
+        self._history_dialog.refresh()
+        self._history_dialog.show()
+        self._history_dialog.raise_()
+        self._history_dialog.activateWindow()
 
     def _on_ocr_direction_changed(self, direction: str):
         self._config.ocr_direction = direction
@@ -224,6 +319,7 @@ class TranslatorApp:
 
     def _quit(self):
         self._stop_pipelines()
+        set_live_captions_visible(True)  # don't leave Live Captions stranded off-screen
         self._caption.save_geometry()
         self._config.save()
         self._tray.hide()

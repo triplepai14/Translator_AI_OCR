@@ -5,16 +5,19 @@ from PySide6.QtWidgets import (
     QComboBox,
     QCheckBox,
     QDialog,
+    QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QRadioButton,
     QSlider,
+    QSpinBox,
     QVBoxLayout,
 )
 
-from ..config import LC_PAIRS, LC_SOURCES, LC_TARGETS, AppMode, OverlayMode
+from ..config import ENGINES, LC_SOURCES, LC_TARGETS, AppMode, OverlayMode, valid_lc_pair
 
 
 class SettingsDialog(QDialog):
@@ -22,6 +25,9 @@ class SettingsDialog(QDialog):
 
     mode_changed = Signal(object)  # AppMode
     lc_pair_changed = Signal(str, str)  # (source, target)
+    lc_engine_changed = Signal()  # engine selection or API settings applied
+    show_live_captions_changed = Signal(bool)
+    overlay_sentences_changed = Signal(int)
     ocr_direction_changed = Signal(str)
     overlay_mode_changed = Signal(object)  # OverlayMode
     vertical_text_changed = Signal(bool)
@@ -61,6 +67,50 @@ class SettingsDialog(QDialog):
         # ----- Live Captions options -----
         self._lc_group = QGroupBox("Live Captions")
         lc_outer = QVBoxLayout(self._lc_group)
+
+        # Engine selection
+        engine_row = QHBoxLayout()
+        engine_row.addWidget(QLabel("Engine:"))
+        self._engine_combo = QComboBox()
+        for code, label in ENGINES.items():
+            self._engine_combo.addItem(label, code)
+        idx = self._engine_combo.findData(self._config.translation_engine)
+        if idx >= 0:
+            self._engine_combo.setCurrentIndex(idx)
+        self._engine_combo.currentIndexChanged.connect(self._on_engine_changed)
+        engine_row.addWidget(self._engine_combo, 1)
+        lc_outer.addLayout(engine_row)
+
+        # Per-engine API settings (shown/hidden by engine)
+        self._api_form = QFormLayout()
+        self._deepl_key = self._api_field("deepl_api_key", password=True)
+        self._openai_base = self._api_field("openai_base_url")
+        self._openai_key = self._api_field("openai_api_key", password=True)
+        self._openai_model = self._api_field("openai_model")
+        self._ollama_base = self._api_field("ollama_base_url")
+        self._ollama_model = self._api_field("ollama_model")
+        self._lt_url = self._api_field("libretranslate_url")
+        self._lt_key = self._api_field("libretranslate_api_key", password=True)
+        self._api_rows = {
+            "deepl": [("API key:", self._deepl_key)],
+            "openai": [
+                ("Base URL:", self._openai_base),
+                ("API key:", self._openai_key),
+                ("Model:", self._openai_model),
+            ],
+            "ollama": [("Server:", self._ollama_base), ("Model:", self._ollama_model)],
+            "libretranslate": [("Server URL:", self._lt_url), ("API key:", self._lt_key)],
+        }
+        for rows in self._api_rows.values():
+            for label, field in rows:
+                self._api_form.addRow(label, field)
+        lc_outer.addLayout(self._api_form)
+
+        self._apply_engine_btn = QPushButton("Apply engine settings")
+        self._apply_engine_btn.clicked.connect(self.lc_engine_changed.emit)
+        lc_outer.addWidget(self._apply_engine_btn)
+
+        # Languages
         lc_layout = QHBoxLayout()
         lc_layout.addWidget(QLabel("Caption language:"))
         self._lc_source_combo = QComboBox()
@@ -80,6 +130,21 @@ class SettingsDialog(QDialog):
         lc_layout.addStretch()
         lc_outer.addLayout(lc_layout)
 
+        # Display options
+        opt_row2 = QHBoxLayout()
+        self._show_lc_check = QCheckBox("Show Live Captions window")
+        self._show_lc_check.setChecked(self._config.show_live_captions)
+        self._show_lc_check.toggled.connect(self.show_live_captions_changed.emit)
+        opt_row2.addWidget(self._show_lc_check)
+        opt_row2.addWidget(QLabel("Sentences shown:"))
+        self._sentences_spin = QSpinBox()
+        self._sentences_spin.setRange(1, 5)
+        self._sentences_spin.setValue(self._config.overlay_sentences)
+        self._sentences_spin.valueChanged.connect(self.overlay_sentences_changed.emit)
+        opt_row2.addWidget(self._sentences_spin)
+        opt_row2.addStretch()
+        lc_outer.addLayout(opt_row2)
+
         lc_hint = QLabel(
             "The caption language must also be set inside Live Captions itself\n"
             "(gear icon on the Live Captions bar → Caption language)."
@@ -87,6 +152,7 @@ class SettingsDialog(QDialog):
         lc_hint.setStyleSheet("color: #888; font-size: 11px;")
         lc_outer.addWidget(lc_hint)
         layout.addWidget(self._lc_group)
+        self._update_api_rows()
 
         # ----- Screen OCR options -----
         self._ocr_group = QGroupBox("Screen OCR")
@@ -188,13 +254,41 @@ class SettingsDialog(QDialog):
 
     # ---------- handlers ----------
 
+    def _api_field(self, config_attr: str, password: bool = False) -> QLineEdit:
+        """Create a QLineEdit bound to a config attribute."""
+        field = QLineEdit(getattr(self._config, config_attr, ""))
+        if password:
+            field.setEchoMode(QLineEdit.EchoMode.Password)
+        field.editingFinished.connect(lambda: setattr(self._config, config_attr, field.text().strip()))
+        return field
+
+    def _update_api_rows(self):
+        """Show only the API fields relevant to the selected engine."""
+        engine = self._engine_combo.currentData()
+        for eng, rows in self._api_rows.items():
+            visible = eng == engine
+            for label, field in rows:
+                field.setVisible(visible)
+                lbl = self._api_form.labelForField(field)
+                if lbl:
+                    lbl.setVisible(visible)
+        self._apply_engine_btn.setVisible(engine != "offline")
+
+    def _on_engine_changed(self, _index: int):
+        self._config.translation_engine = self._engine_combo.currentData()
+        self._update_api_rows()
+        self._rebuild_lc_targets()
+        self._emit_lc_pair()
+        self.lc_engine_changed.emit()
+
     def _rebuild_lc_targets(self):
-        """Fill the target combo with languages valid for the selected source."""
+        """Fill the target combo with languages valid for the engine + source."""
+        engine = self._engine_combo.currentData()
         source = self._lc_source_combo.currentData()
         self._lc_target_combo.blockSignals(True)
         self._lc_target_combo.clear()
         for code, label in LC_TARGETS.items():
-            if (source, code) in LC_PAIRS:
+            if valid_lc_pair(engine, source, code):
                 self._lc_target_combo.addItem(label, code)
         idx = self._lc_target_combo.findData(self._config.lc_target)
         self._lc_target_combo.setCurrentIndex(idx if idx >= 0 else 0)

@@ -30,6 +30,32 @@ def is_supported() -> bool:
     return sys.platform == "win32"
 
 
+def set_live_captions_visible(visible: bool) -> bool:
+    """Move the Live Captions window on/off screen.
+
+    Off-screen it keeps transcribing but stays out of the user's way
+    (the same trick LiveCaptions-Translator uses).
+
+    Returns:
+        True if the window was found and moved.
+    """
+    if not is_supported():
+        return False
+    import ctypes
+
+    user32 = ctypes.windll.user32
+    hwnd = user32.FindWindowW(WINDOW_CLASS, None)
+    if not hwnd:
+        return False
+    SWP_NOSIZE, SWP_NOZORDER, SWP_NOACTIVATE = 0x1, 0x4, 0x10
+    flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
+    if visible:
+        user32.SetWindowPos(hwnd, 0, 60, 60, 0, 0, flags)
+    else:
+        user32.SetWindowPos(hwnd, 0, -32000, -32000, 0, 0, flags)
+    return True
+
+
 def launch_live_captions() -> bool:
     """Start LiveCaptions.exe if it is not already running.
 
@@ -153,7 +179,7 @@ def split_transcript(transcript: str, lang: str = "en") -> tuple[str, str]:
     if not text:
         return "", ""
 
-    pattern = _SENTENCE_END_CJK if lang == "ja" else _SENTENCE_END_LATIN
+    pattern = _SENTENCE_END_CJK if lang in ("ja", "zh") else _SENTENCE_END_LATIN
     ends = [min(m.end(), len(text)) for m in pattern.finditer(text + " ")]
     if not ends:
         return "", text

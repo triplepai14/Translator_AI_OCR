@@ -6,14 +6,14 @@ import time
 from PySide6.QtCore import QObject, Signal
 
 from .. import log
+from ..engines import CachedEngine
 from ..livecaptions import LiveCaptionsReader, launch_live_captions, split_transcript
-from ..translate import Translator
 
 logger = log.get_logger()
 
 POLL_INTERVAL = 0.25  # seconds between transcript reads
 PARTIAL_TRANSLATE_AFTER = 0.9  # translate an unchanged partial sentence after this long
-MIN_PARTIAL_CHARS = {"en": 12, "ja": 6}  # don't translate very short partials
+MIN_PARTIAL_CHARS = {"en": 12, "ja": 6, "zh": 6, "ko": 6}  # don't translate very short partials
 
 
 class LiveCaptionsWorker(QObject):
@@ -21,22 +21,22 @@ class LiveCaptionsWorker(QObject):
 
     Signals:
         original_changed: latest original text (partial or complete sentence)
-        translation_ready: translated text for the latest sentence
+        translation_ready: (original sentence, translated text)
         status_changed: "loading_model" | "connecting" | "needs_setup" |
                         "running" | "stopped" | "error:<msg>"
     """
 
     original_changed = Signal(str)
-    translation_ready = Signal(str)
+    translation_ready = Signal(str, str)
     status_changed = Signal(str)
 
-    def __init__(self, source_lang: str = "en", target_lang: str = "ja"):
+    def __init__(self, engine: CachedEngine, source_lang: str = "en"):
         super().__init__()
+        self._engine = engine
         self._source_lang = source_lang
-        self._target_lang = target_lang
         self._thread: threading.Thread | None = None
         self._running = False
-        self._translator: Translator | None = None
+        self.paused = False  # set from the GUI thread; worker only reads it
 
     def start(self):
         if self._thread is not None:
@@ -50,17 +50,15 @@ class LiveCaptionsWorker(QObject):
         self._thread = None
 
     def _run(self):
-        logger.debug(
-            "live captions worker starting", source=self._source_lang, target=self._target_lang
-        )
+        logger.debug("live captions worker starting", source=self._source_lang)
 
-        # Load the translation model first (downloads on first use)
-        self.status_changed.emit("loading_model")
+        # Prepare the engine (offline engines may download models on first use)
+        if self._engine.requires_download:
+            self.status_changed.emit("loading_model")
         try:
-            self._translator = Translator(direction=f"{self._source_lang}-{self._target_lang}")
-            self._translator.load()
+            self._engine.load()
         except Exception as e:
-            logger.error("failed to load translation model", error=str(e))
+            logger.error("failed to prepare translation engine", error=str(e))
             self.status_changed.emit(f"error:{e}")
             return
 
@@ -76,6 +74,7 @@ class LiveCaptionsWorker(QObject):
         reader = LiveCaptionsReader()
         launched = False
         connected = False
+        error_streak = 0
 
         last_partial = ""
         last_partial_time = 0.0
@@ -98,6 +97,10 @@ class LiveCaptionsWorker(QObject):
                     continue
                 connected = True
                 self.status_changed.emit("running")
+
+            if self.paused:
+                time.sleep(POLL_INTERVAL)
+                continue
 
             transcript = reader.read()
             if transcript is None:
@@ -134,11 +137,16 @@ class LiveCaptionsWorker(QObject):
 
             if source:
                 try:
-                    translated, _cached = self._translator.translate(source)
+                    translated, _cached = self._engine.translate(source)
+                    error_streak = 0
                     if translated:
                         last_translated_source = source
-                        self.translation_ready.emit(translated)
+                        self.translation_ready.emit(source, translated)
                 except Exception as e:
+                    error_streak += 1
                     logger.warning("translation error", error=str(e))
+                    if error_streak >= 3:
+                        self.status_changed.emit(f"error:{str(e)[:120]}")
+                        error_streak = 0
 
             time.sleep(POLL_INTERVAL)

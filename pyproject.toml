@@ -1,6 +1,6 @@
 [project]
 name = "translator-ai-ocr"
-version = "1.1.0"
+version = "1.2.0"
 description = "AI screen & Live Captions translator - OCR and offline neural translation with a caption bar overlay"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
@@ -28,6 +28,8 @@ dependencies = [
     "mss>=9.0.0",
     # Configuration
     "PyYAML>=6.0",
+    # Online translation engines
+    "requests",
     # Logging
     "structlog>=24.0.0",
     # GUI
