@@ -227,6 +227,7 @@ class TranslatorApp:
 
 def run() -> int:
     """Run the application."""
+    log.configure()  # must run before any log call (windowed builds log to file)
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)  # keep running in tray
     app.setApplicationName("Translator AI OCR")

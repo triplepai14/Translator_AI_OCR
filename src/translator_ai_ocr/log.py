@@ -10,6 +10,7 @@ Provides zerolog-style output with aligned 3-letter level names:
 import logging
 import sys
 from datetime import datetime
+from pathlib import Path
 
 import structlog
 
@@ -81,11 +82,18 @@ def configure(level: str = "INFO", debug: bool = False) -> None:
         _render_kv_pairs,
     ]
 
+    # Windowed (no-console) builds have no stdout - log to a file instead
+    stream = sys.stdout
+    if stream is None or not hasattr(stream, "write"):
+        log_dir = Path.home() / ".translator_ai_ocr"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        stream = open(log_dir / "app.log", "a", encoding="utf-8", buffering=1)  # noqa: SIM115
+
     structlog.configure(
         processors=processors,
         wrapper_class=structlog.make_filtering_bound_logger(getattr(logging, level.upper(), logging.INFO)),
         context_class=dict,
-        logger_factory=structlog.PrintLoggerFactory(file=sys.stdout),
+        logger_factory=structlog.PrintLoggerFactory(file=stream),
         cache_logger_on_first_use=True,
     )
 
