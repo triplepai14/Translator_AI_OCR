@@ -1,0 +1,475 @@
+"""OCR module using MeikiOCR for Japanese game text extraction."""
+
+from dataclasses import dataclass
+
+import numpy as np
+from numpy.typing import NDArray
+
+from . import log
+from .capture.convert import bgra_to_rgb
+
+logger = log.get_logger()
+
+# Detection thresholds
+DEFAULT_CONFIDENCE_THRESHOLD = 0.6  # Minimum avg confidence per line (0.0-1.0)
+DUPLICATE_OVERLAP_THRESHOLD = 0.5  # Lines with >50% bbox overlap are duplicates
+SPATIAL_PROXIMITY_MULTIPLIER = 1.5  # Gap threshold = character size * this value
+FURIGANA_SIZE_RATIO = 0.6  # Kana-only lines smaller than this fraction of the largest line are ruby text
+EDGE_CUTOFF_MARGIN = 3  # Regions within this many pixels of the top/bottom edge are considered cut off
+
+# Punctuation characters to exclude from confidence calculation
+# These often have lower OCR confidence but shouldn't invalidate the line
+PUNCTUATION = set("。、！？・…「」『』（）【】〈〉《》～ー－—.!?,;:'\"()-~")
+
+
+def _char_size(bbox: list) -> int:
+    """Character size of a line: the short side of its bbox.
+
+    For horizontal lines that is the height, for vertical columns the width.
+    """
+    return min(bbox[2] - bbox[0], bbox[3] - bbox[1])
+
+
+def _contains_cjk(text: str) -> bool:
+    """Check if text contains CJK/kana characters (no-space scripts)."""
+    return any(0x3040 <= ord(c) <= 0x30FF or 0x4E00 <= ord(c) <= 0x9FFF for c in text)
+
+
+def _is_kana_only(text: str) -> bool:
+    """Check if text consists only of hiragana/katakana (ignoring punctuation)."""
+    chars = [c for c in text if c not in PUNCTUATION and not c.isspace()]
+    if not chars:
+        return False
+    return all(0x3040 <= ord(c) <= 0x30FF for c in chars)
+
+
+def _is_furigana(line: dict, cluster: list[dict]) -> bool:
+    """Check if a line is a furigana (ruby) annotation within its cluster.
+
+    Furigana is kana-only, much smaller than its base text, and sits
+    immediately to the right of its base column (vertical text) or
+    immediately above its base line (horizontal text). Plain kana-only
+    text columns are NOT furigana - position matters, not just size.
+    """
+    if not _is_kana_only(line["text"]):
+        return False
+    size = _char_size(line["bbox"])
+    lx1, ly1, lx2, ly2 = line["bbox"]
+    for other in cluster:
+        if other is line:
+            continue
+        other_size = _char_size(other["bbox"])
+        if size >= other_size * FURIGANA_SIZE_RATIO:
+            continue
+        ox1, oy1, ox2, oy2 = other["bbox"]
+        y_overlap = not (ly2 <= oy1 or ly1 >= oy2)
+        x_overlap = not (lx2 <= ox1 or lx1 >= ox2)
+        # Vertical text: ruby sits just right of its base column
+        if y_overlap and 0 <= lx1 - ox2 <= other_size:
+            return True
+        # Horizontal text: ruby sits just above its base line
+        if x_overlap and 0 <= oy1 - ly2 <= other_size:
+            return True
+    return False
+
+
+@dataclass
+class OCRResult:
+    """Result from OCR extraction with optional bounding box."""
+
+    text: str
+    bbox: dict | None = None  # {"x": int, "y": int, "width": int, "height": int}
+
+
+class OCR:
+    """Extracts Japanese text from images using MeikiOCR.
+
+    MeikiOCR is specifically trained on Japanese video game text,
+    providing significantly better accuracy on pixel fonts than
+    general-purpose OCR.
+    """
+
+    def __init__(self, confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD, debug: bool = False):
+        """Initialize OCR (lazy loading of model).
+
+        Args:
+            confidence_threshold: Minimum average confidence per line (0.0-1.0).
+                Lines below this threshold are filtered out.
+            debug: If True, print per-character confidence scores.
+        """
+        self._model = None
+        self._confidence_threshold = confidence_threshold
+        self._debug = debug
+
+    @property
+    def confidence_threshold(self) -> float:
+        """Get the confidence threshold."""
+        return self._confidence_threshold
+
+    @confidence_threshold.setter
+    def confidence_threshold(self, value: float) -> None:
+        """Set the confidence threshold."""
+        self._confidence_threshold = value
+
+    def load(self) -> None:
+        """Load the MeikiOCR model.
+
+        Raises:
+            Exception: If model fails to load.
+        """
+        if self._model is not None:
+            return
+
+        logger.info("loading meikiocr")
+        from meikiocr import MeikiOCR
+
+        self._model = MeikiOCR()
+        logger.info("meikiocr ready")
+
+    def _run_ocr_and_filter(self, image: NDArray[np.uint8]) -> list[dict]:
+        """Run OCR and filter results by confidence threshold.
+
+        This is the common logic shared between extract_text() and extract_text_regions().
+
+        Args:
+            image: Numpy array (H, W, 4) in BGRA format.
+
+        Returns:
+            List of line dicts: [{"text": str, "bbox": [x1, y1, x2, y2]}, ...]
+            Lines are deduplicated but not sorted or clustered.
+        """
+        if self._model is None:
+            self.load()
+
+        # Convert BGRA to RGB for MeikiOCR
+        img_array = bgra_to_rgb(image)
+        results = self._model.run_ocr(img_array)
+
+        lines = []
+        for result in results:
+            chars = result.get("chars", [])
+            text = result.get("text", "")
+
+            if not chars or not text:
+                continue
+
+            non_punct_chars = [c for c in chars if c["char"] not in PUNCTUATION]
+
+            if non_punct_chars:
+                avg_conf = sum(c["conf"] for c in non_punct_chars) / len(non_punct_chars)
+            elif chars:
+                avg_conf = sum(c["conf"] for c in chars) / len(chars)
+            else:
+                continue
+
+            # Only log rejected regions in debug mode (accepted ones are too verbose)
+            if self._debug and chars and avg_conf < self._confidence_threshold:
+                char_info = " ".join(f"{c['char']}({c['conf']:.2f})" for c in chars)
+                punct_note = (
+                    f" (excl {len(chars) - len(non_punct_chars)} punct)" if len(non_punct_chars) < len(chars) else ""
+                )
+                logger.debug("ocr rejected", chars=char_info, avg=f"{avg_conf:.2f}", note=punct_note)
+
+            if avg_conf >= self._confidence_threshold:
+                char_bboxes = [c["bbox"] for c in chars if c.get("bbox") and len(c["bbox"]) == 4]
+                if char_bboxes:
+                    min_x = min(b[0] for b in char_bboxes)
+                    min_y = min(b[1] for b in char_bboxes)
+                    max_x = max(b[2] for b in char_bboxes)
+                    max_y = max(b[3] for b in char_bboxes)
+
+                    # Validate bbox coordinates
+                    if min_x < 0 or min_y < 0 or max_x <= min_x or max_y <= min_y:
+                        logger.debug("invalid bbox, skipping", bbox=[min_x, min_y, max_x, max_y])
+                        continue
+
+                    lines.append(
+                        {
+                            "text": text,
+                            "bbox": [min_x, min_y, max_x, max_y],
+                        }
+                    )
+
+        return self._deduplicate_lines(lines)
+
+    def extract_text(self, image: NDArray[np.uint8]) -> str:
+        """Extract Japanese text from an image.
+
+        Args:
+            image: Numpy array (H, W, 4) in BGRA format.
+
+        Returns:
+            Extracted text string.
+        """
+        lines = self._run_ocr_and_filter(image)
+        if not lines:
+            return ""
+
+        # Sort by position (top-to-bottom, left-to-right) for correct reading order
+        lines = sorted(lines, key=lambda line: (line["bbox"][1], line["bbox"][0]))
+
+        # Concatenate all text (no spatial clustering for banner mode)
+        return self._clean_text("".join(line["text"] for line in lines))
+
+    def extract_text_regions(self, image: NDArray[np.uint8]) -> list[OCRResult]:
+        """Extract Japanese text regions from an image with spatial clustering.
+
+        Lines that are spatially close are grouped into the same region.
+        This handles screens with multiple separate text areas.
+
+        Args:
+            image: Numpy array (H, W, 4) in BGRA format.
+
+        Returns:
+            List of OCRResult objects, one per detected text region.
+        """
+        lines = self._run_ocr_and_filter(image)
+        if not lines:
+            return []
+
+        # Drop furigana before clustering: small kana-only ruby annotations
+        # beside/above the main text would corrupt the translation input.
+        non_ruby = [line for line in lines if not _is_furigana(line, lines)]
+        if non_ruby:
+            lines = non_ruby
+
+        # Cluster lines by spatial proximity
+        clusters = self._cluster_lines(lines)
+
+        img_height = image.shape[0] if image is not None and hasattr(image, "shape") else None
+
+        # Convert clusters to OCRResult objects
+        regions = []
+        for cluster in clusters:
+            # Skip regions cut off by the top/bottom frame edge (partially
+            # scrolled-off text produces garbage translations)
+            if img_height is not None:
+                min_y = min(line["bbox"][1] for line in cluster)
+                max_y = max(line["bbox"][3] for line in cluster)
+                if min_y <= EDGE_CUTOFF_MARGIN or max_y >= img_height - EDGE_CUTOFF_MARGIN:
+                    continue
+
+            # Sort lines in reading order. Vertical columns (taller than wide,
+            # as in manga) read right-to-left; horizontal lines top-to-bottom.
+            vertical_lines = sum(
+                1 for line in cluster if (line["bbox"][3] - line["bbox"][1]) > (line["bbox"][2] - line["bbox"][0])
+            )
+            if vertical_lines * 2 > len(cluster):
+                cluster.sort(key=lambda line: -line["bbox"][2])
+            else:
+                # Row-then-x order: fragments of the same visual row must sort
+                # left-to-right, not by their slightly different y coordinates
+                heights = [line["bbox"][3] - line["bbox"][1] for line in cluster]
+                row_height = max(1.0, sum(heights) / len(heights))
+                cluster.sort(
+                    key=lambda line: (
+                        int((line["bbox"][1] + line["bbox"][3]) / 2 / row_height),
+                        line["bbox"][0],
+                    )
+                )
+
+            # Combine text from lines. Japanese joins without spaces; Latin
+            # text (e.g. English subtitles) needs a space between lines.
+            separator = "" if any(_contains_cjk(line["text"]) for line in cluster) else " "
+            text = separator.join(line["text"] for line in cluster)
+            text = self._clean_text(text)
+
+            if not text:
+                continue
+
+            # Compute bbox for this cluster
+            min_x = min(line["bbox"][0] for line in cluster)
+            min_y = min(line["bbox"][1] for line in cluster)
+            max_x = max(line["bbox"][2] for line in cluster)
+            max_y = max(line["bbox"][3] for line in cluster)
+
+            bbox = {
+                "x": int(min_x),
+                "y": int(min_y),
+                "width": int(max_x - min_x),
+                "height": int(max_y - min_y),
+            }
+
+            regions.append(OCRResult(text=text, bbox=bbox))
+
+        return regions
+
+    def _deduplicate_lines(self, lines: list[dict]) -> list[dict]:
+        """Remove duplicate/overlapping line detections.
+
+        If two lines have bboxes that overlap significantly (>50%),
+        keep only the longer one.
+
+        Args:
+            lines: List of line dicts with 'text' and 'bbox' keys.
+
+        Returns:
+            Deduplicated list of lines.
+        """
+        if len(lines) <= 1:
+            return lines
+
+        # Sort by text length (descending) so we prefer longer detections
+        lines = sorted(lines, key=lambda line: len(line["text"]), reverse=True)
+
+        kept = []
+        for line in lines:
+            x1, y1, x2, y2 = line["bbox"]
+            line_area = (x2 - x1) * (y2 - y1)
+
+            # Check if this line overlaps significantly with any kept line
+            is_duplicate = False
+            for kept_line in kept:
+                kx1, ky1, kx2, ky2 = kept_line["bbox"]
+
+                # Calculate intersection
+                ix1 = max(x1, kx1)
+                iy1 = max(y1, ky1)
+                ix2 = min(x2, kx2)
+                iy2 = min(y2, ky2)
+
+                if ix1 < ix2 and iy1 < iy2:
+                    intersection_area = (ix2 - ix1) * (iy2 - iy1)
+                    if line_area > 0 and intersection_area / line_area > DUPLICATE_OVERLAP_THRESHOLD:
+                        is_duplicate = True
+                        break
+
+            if not is_duplicate:
+                kept.append(line)
+
+        return kept
+
+    def _cluster_lines(self, lines: list[dict]) -> list[list[dict]]:
+        """Cluster lines based on spatial proximity.
+
+        Lines are grouped if they are close horizontally and vertically.
+
+        Args:
+            lines: List of line dicts with 'text' and 'bbox' keys.
+
+        Returns:
+            List of clusters, where each cluster is a list of line dicts.
+        """
+        if not lines:
+            return []
+
+        # Sort by position (top-to-bottom, left-to-right)
+        lines = sorted(lines, key=lambda line: (line["bbox"][1], line["bbox"][0]))
+
+        clusters = []
+
+        for line in lines:
+            x1, y1, x2, y2 = line["bbox"]
+            char_size = _char_size(line["bbox"])
+
+            # Find all clusters this line is close to (it may bridge several).
+            # The gap threshold uses the character size (short side of the
+            # bbox), not the line length: for horizontal lines that is the
+            # height, for vertical columns (manga) it is the width. Using the
+            # long side of a vertical column would merge separate speech
+            # bubbles across half the page. Take the max of both lines' sizes
+            # so a large-font column still merges with its small-font neighbor.
+            matching = []
+            for cluster in clusters:
+                for existing in cluster:
+                    ex1, ey1, ex2, ey2 = existing["bbox"]
+
+                    h_threshold = max(char_size, _char_size(existing["bbox"])) * SPATIAL_PROXIMITY_MULTIPLIER
+
+                    # Check vertical overlap - must actually overlap
+                    y_overlap = not (y2 <= ey1 or y1 >= ey2)
+
+                    # Check horizontal proximity
+                    h_gap = min(abs(x1 - ex2), abs(x2 - ex1))
+
+                    if y_overlap and h_gap < h_threshold:
+                        matching.append(cluster)
+                        break
+
+            if matching:
+                # Merge the line and any bridged clusters into one
+                target = matching[0]
+                target.append(line)
+                for other in matching[1:]:
+                    target.extend(other)
+                    clusters.remove(other)
+            else:
+                clusters.append([line])
+
+        return clusters
+
+    def is_loaded(self) -> bool:
+        """Check if the model is loaded."""
+        return self._model is not None
+
+    def _clean_text(self, text: str) -> str:
+        """Clean extracted text.
+
+        Args:
+            text: Raw extracted text.
+
+        Returns:
+            Cleaned text.
+        """
+        if not text:
+            return ""
+
+        # Remove extra whitespace
+        text = " ".join(text.split())
+
+        # Strip leading/trailing whitespace
+        text = text.strip()
+
+        return text
+
+
+class LatinOCR(OCR):
+    """OCR for Latin-script text (e.g. English subtitles) using RapidOCR.
+
+    MeikiOCR is trained on Japanese text and drops spaces and characters in
+    English text; RapidOCR (PaddleOCR models) reads Latin text reliably.
+    Used for the en->ja translation direction (e.g. Windows Live Captions).
+    """
+
+    def load(self) -> None:
+        """Load the RapidOCR model.
+
+        Raises:
+            Exception: If model fails to load.
+        """
+        if self._model is not None:
+            return
+
+        logger.info("loading rapidocr")
+        from rapidocr_onnxruntime import RapidOCR
+
+        self._model = RapidOCR()
+        logger.info("rapidocr ready")
+
+    def _run_ocr_and_filter(self, image: NDArray[np.uint8]) -> list[dict]:
+        """Run RapidOCR and filter results by confidence threshold.
+
+        Args:
+            image: Numpy array (H, W, 4) in BGRA format.
+
+        Returns:
+            List of line dicts: [{"text": str, "bbox": [x1, y1, x2, y2]}, ...]
+        """
+        if self._model is None:
+            self.load()
+
+        img_array = bgra_to_rgb(image)
+        result, _ = self._model(img_array)
+
+        lines = []
+        for box, text, score in result or []:
+            if not text or float(score) < self._confidence_threshold:
+                continue
+            xs = [point[0] for point in box]
+            ys = [point[1] for point in box]
+            bbox = [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))]
+            if bbox[0] < 0 or bbox[1] < 0 or bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+                continue
+            lines.append({"text": text, "bbox": bbox})
+
+        return self._deduplicate_lines(lines)
