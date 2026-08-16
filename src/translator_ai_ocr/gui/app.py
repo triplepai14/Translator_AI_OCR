@@ -93,7 +93,9 @@ class TranslatorApp:
         if mode == AppMode.LIVE_CAPTIONS:
             self._caption.set_translation("")
             self._caption.set_status("Starting Live Captions mode...")
-            self._lc_worker = LiveCaptionsWorker(target_lang=self._config.lc_target)
+            self._lc_worker = LiveCaptionsWorker(
+                source_lang=self._config.lc_source, target_lang=self._config.lc_target
+            )
             self._lc_worker.original_changed.connect(self._caption.set_original)
             self._lc_worker.translation_ready.connect(self._caption.set_translation)
             self._lc_worker.status_changed.connect(self._on_lc_status)
@@ -145,7 +147,7 @@ class TranslatorApp:
             self._settings = SettingsDialog(self._config, self._ocr.list_windows)
             s = self._settings
             s.mode_changed.connect(self._start_mode)
-            s.lc_target_changed.connect(self._on_lc_target_changed)
+            s.lc_pair_changed.connect(self._on_lc_pair_changed)
             s.ocr_direction_changed.connect(self._on_ocr_direction_changed)
             s.overlay_mode_changed.connect(self._on_overlay_mode_changed)
             s.vertical_text_changed.connect(self._on_vertical_text_changed)
@@ -159,10 +161,13 @@ class TranslatorApp:
         self._settings.raise_()
         self._settings.activateWindow()
 
-    def _on_lc_target_changed(self, target: str):
+    def _on_lc_pair_changed(self, source: str, target: str):
+        if (source, target) == (self._config.lc_source, self._config.lc_target):
+            return
+        self._config.lc_source = source
         self._config.lc_target = target
         if self._config.app_mode == AppMode.LIVE_CAPTIONS:
-            self._start_mode(AppMode.LIVE_CAPTIONS)  # restart with new target
+            self._start_mode(AppMode.LIVE_CAPTIONS)  # restart with new languages
 
     def _on_ocr_direction_changed(self, direction: str):
         self._config.ocr_direction = direction

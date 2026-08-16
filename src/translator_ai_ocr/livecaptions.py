@@ -18,8 +18,11 @@ CAPTIONS_TEXT_ID = "CaptionsTextBlock"
 SETUP_TEXT_ID = "SetupToContinueText"
 READY_TEXT_ID = "ReadyToCaptionTextBlock"
 
-# Sentence terminators for splitting the rolling transcript
-_SENTENCE_END = re.compile(r"[.!?…]+[\s\"')\]]*\s")
+# Sentence terminators for splitting the rolling transcript.
+# Latin: needs trailing whitespace so "3.5" doesn't split.
+# CJK: 。！？ end a sentence with no space after.
+_SENTENCE_END_LATIN = re.compile(r"[.!?…]+[\s\"')\]]*\s")
+_SENTENCE_END_CJK = re.compile(r"[。！？…]+|[.!?]+\s")
 
 
 def is_supported() -> bool:
@@ -135,11 +138,12 @@ class LiveCaptionsReader:
             return ""
 
 
-def split_transcript(transcript: str) -> tuple[str, str]:
+def split_transcript(transcript: str, lang: str = "en") -> tuple[str, str]:
     """Split a rolling transcript into (last complete sentence, current partial).
 
     Args:
         transcript: Raw transcript text from Live Captions.
+        lang: Caption language code ("en", "ja", ...) - selects sentence rules.
 
     Returns:
         Tuple of (last_complete_sentence, current_partial_sentence).
@@ -149,16 +153,16 @@ def split_transcript(transcript: str) -> tuple[str, str]:
     if not text:
         return "", ""
 
-    ends = list(_SENTENCE_END.finditer(text + " "))
+    pattern = _SENTENCE_END_CJK if lang == "ja" else _SENTENCE_END_LATIN
+    ends = [min(m.end(), len(text)) for m in pattern.finditer(text + " ")]
     if not ends:
         return "", text
 
-    last_end = ends[-1].end()
-    if last_end >= len(text) + 1:
+    if ends[-1] >= len(text):
         # Transcript currently ends exactly at a sentence boundary
-        start = ends[-2].end() if len(ends) >= 2 else 0
-        return text[start:last_end].strip(), ""
+        start = ends[-2] if len(ends) >= 2 else 0
+        return text[start:].strip(), ""
 
-    start = ends[-1].end()
-    prev_start = ends[-2].end() if len(ends) >= 2 else 0
-    return text[prev_start : ends[-1].end()].strip(), text[start:].strip()
+    start = ends[-1]
+    prev_start = ends[-2] if len(ends) >= 2 else 0
+    return text[prev_start:start].strip(), text[start:].strip()

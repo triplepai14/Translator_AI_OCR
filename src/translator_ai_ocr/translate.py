@@ -45,6 +45,14 @@ MODEL_SPECS = {
         "target_token": "tha_Thai",
         "compute_type": "int8",
     },
+    "ja-th": {
+        "repo_id": "entai2965/nllb-200-distilled-600M-ctranslate2",
+        "required_files": ["model.bin", "sentencepiece.bpe.model"],
+        "tokenizer_file": "sentencepiece.bpe.model",
+        "source_token": "jpn_Jpan",
+        "target_token": "tha_Thai",
+        "compute_type": "int8",
+    },
 }
 
 # Translation cache defaults

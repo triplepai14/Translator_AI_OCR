@@ -13,7 +13,7 @@ logger = log.get_logger()
 
 POLL_INTERVAL = 0.25  # seconds between transcript reads
 PARTIAL_TRANSLATE_AFTER = 0.9  # translate an unchanged partial sentence after this long
-MIN_PARTIAL_CHARS = 12  # don't translate very short partials
+MIN_PARTIAL_CHARS = {"en": 12, "ja": 6}  # don't translate very short partials
 
 
 class LiveCaptionsWorker(QObject):
@@ -30,8 +30,9 @@ class LiveCaptionsWorker(QObject):
     translation_ready = Signal(str)
     status_changed = Signal(str)
 
-    def __init__(self, target_lang: str = "ja"):
+    def __init__(self, source_lang: str = "en", target_lang: str = "ja"):
         super().__init__()
+        self._source_lang = source_lang
         self._target_lang = target_lang
         self._thread: threading.Thread | None = None
         self._running = False
@@ -49,12 +50,14 @@ class LiveCaptionsWorker(QObject):
         self._thread = None
 
     def _run(self):
-        logger.debug("live captions worker starting", target=self._target_lang)
+        logger.debug(
+            "live captions worker starting", source=self._source_lang, target=self._target_lang
+        )
 
         # Load the translation model first (downloads on first use)
         self.status_changed.emit("loading_model")
         try:
-            self._translator = Translator(direction=f"en-{self._target_lang}")
+            self._translator = Translator(direction=f"{self._source_lang}-{self._target_lang}")
             self._translator.load()
         except Exception as e:
             logger.error("failed to load translation model", error=str(e))
@@ -101,7 +104,7 @@ class LiveCaptionsWorker(QObject):
                 connected = False
                 continue
 
-            complete, partial = split_transcript(transcript)
+            complete, partial = split_transcript(transcript, lang=self._source_lang)
             now = time.monotonic()
 
             # Show the freshest original text
@@ -123,7 +126,7 @@ class LiveCaptionsWorker(QObject):
                 source = complete
             elif (
                 partial
-                and len(partial) >= MIN_PARTIAL_CHARS
+                and len(partial) >= MIN_PARTIAL_CHARS.get(self._source_lang, 12)
                 and partial != last_translated_source
                 and (now - last_partial_time) >= PARTIAL_TRANSLATE_AFTER
             ):

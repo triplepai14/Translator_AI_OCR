@@ -27,10 +27,26 @@ class AppMode(str, Enum):
 
 CONFIG_DIR = Path.home() / ".translator_ai_ocr"
 
-# Live Captions target languages (NLLB-200 codes)
+# Live Captions caption (source) languages. The user must set the same
+# caption language inside Live Captions itself (its gear menu).
+LC_SOURCES = {
+    "en": "English",
+    "ja": "日本語 (Japanese)",
+}
+
+# Live Captions translation target languages
 LC_TARGETS = {
-    "ja": ("jpn_Jpan", "日本語 (Japanese)"),
-    "th": ("tha_Thai", "ไทย (Thai)"),
+    "en": "English",
+    "ja": "日本語 (Japanese)",
+    "th": "ไทย (Thai)",
+}
+
+# Valid source->target pairs (must have a model in translate.MODEL_SPECS)
+LC_PAIRS = {
+    ("en", "ja"),
+    ("en", "th"),
+    ("ja", "en"),
+    ("ja", "th"),
 }
 
 
@@ -40,6 +56,7 @@ class Config:
     def __init__(
         self,
         app_mode: AppMode = AppMode.LIVE_CAPTIONS,
+        lc_source: str = "en",
         lc_target: str = "ja",
         ocr_direction: str = "ja-en",
         overlay_mode: OverlayMode = OverlayMode.BANNER,
@@ -57,7 +74,10 @@ class Config:
         config_path: str | None = None,
     ):
         self.app_mode = app_mode
+        self.lc_source = lc_source if lc_source in LC_SOURCES else "en"
         self.lc_target = lc_target if lc_target in LC_TARGETS else "ja"
+        if (self.lc_source, self.lc_target) not in LC_PAIRS:
+            self.lc_target = "ja" if self.lc_source == "en" else "en"
         self.ocr_direction = ocr_direction if ocr_direction in ("ja-en", "en-ja") else "ja-en"
         self.overlay_mode = overlay_mode
         self.window_title = window_title
@@ -96,6 +116,7 @@ class Config:
 
             return cls(
                 app_mode=app_mode,
+                lc_source=str(data.get("lc_source", "en")),
                 lc_target=str(data.get("lc_target", "ja")),
                 ocr_direction=str(data.get("ocr_direction", "ja-en")),
                 overlay_mode=overlay_mode,
@@ -125,6 +146,7 @@ class Config:
 
         data = {
             "app_mode": self.app_mode.value,
+            "lc_source": str(self.lc_source),
             "lc_target": str(self.lc_target),
             "ocr_direction": str(self.ocr_direction),
             "overlay_mode": self.overlay_mode.value,

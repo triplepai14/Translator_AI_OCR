@@ -14,14 +14,14 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from ..config import LC_TARGETS, AppMode, OverlayMode
+from ..config import LC_PAIRS, LC_SOURCES, LC_TARGETS, AppMode, OverlayMode
 
 
 class SettingsDialog(QDialog):
     """Compact settings dialog. Emits signals when the user changes things."""
 
     mode_changed = Signal(object)  # AppMode
-    lc_target_changed = Signal(str)
+    lc_pair_changed = Signal(str, str)  # (source, target)
     ocr_direction_changed = Signal(str)
     overlay_mode_changed = Signal(object)  # OverlayMode
     vertical_text_changed = Signal(bool)
@@ -59,18 +59,33 @@ class SettingsDialog(QDialog):
         layout.addWidget(mode_group)
 
         # ----- Live Captions options -----
-        self._lc_group = QGroupBox("Live Captions: translate English to")
-        lc_layout = QHBoxLayout(self._lc_group)
-        self._lc_target_combo = QComboBox()
-        for code, (_token, label) in LC_TARGETS.items():
-            self._lc_target_combo.addItem(label, code)
-        idx = self._lc_target_combo.findData(self._config.lc_target)
+        self._lc_group = QGroupBox("Live Captions")
+        lc_outer = QVBoxLayout(self._lc_group)
+        lc_layout = QHBoxLayout()
+        lc_layout.addWidget(QLabel("Caption language:"))
+        self._lc_source_combo = QComboBox()
+        for code, label in LC_SOURCES.items():
+            self._lc_source_combo.addItem(label, code)
+        idx = self._lc_source_combo.findData(self._config.lc_source)
         if idx >= 0:
-            self._lc_target_combo.setCurrentIndex(idx)
-        self._lc_target_combo.currentIndexChanged.connect(
-            lambda _: self.lc_target_changed.emit(self._lc_target_combo.currentData())
-        )
+            self._lc_source_combo.setCurrentIndex(idx)
+        self._lc_source_combo.currentIndexChanged.connect(self._on_lc_source_changed)
+        lc_layout.addWidget(self._lc_source_combo)
+
+        lc_layout.addWidget(QLabel("Translate to:"))
+        self._lc_target_combo = QComboBox()
+        self._rebuild_lc_targets()
+        self._lc_target_combo.currentIndexChanged.connect(self._emit_lc_pair)
         lc_layout.addWidget(self._lc_target_combo)
+        lc_layout.addStretch()
+        lc_outer.addLayout(lc_layout)
+
+        lc_hint = QLabel(
+            "The caption language must also be set inside Live Captions itself\n"
+            "(gear icon on the Live Captions bar → Caption language)."
+        )
+        lc_hint.setStyleSheet("color: #888; font-size: 11px;")
+        lc_outer.addWidget(lc_hint)
         layout.addWidget(self._lc_group)
 
         # ----- Screen OCR options -----
@@ -172,6 +187,28 @@ class SettingsDialog(QDialog):
         self.refresh_windows()
 
     # ---------- handlers ----------
+
+    def _rebuild_lc_targets(self):
+        """Fill the target combo with languages valid for the selected source."""
+        source = self._lc_source_combo.currentData()
+        self._lc_target_combo.blockSignals(True)
+        self._lc_target_combo.clear()
+        for code, label in LC_TARGETS.items():
+            if (source, code) in LC_PAIRS:
+                self._lc_target_combo.addItem(label, code)
+        idx = self._lc_target_combo.findData(self._config.lc_target)
+        self._lc_target_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._lc_target_combo.blockSignals(False)
+
+    def _on_lc_source_changed(self, _index: int):
+        self._rebuild_lc_targets()
+        self._emit_lc_pair()
+
+    def _emit_lc_pair(self, _index: int = 0):
+        source = self._lc_source_combo.currentData()
+        target = self._lc_target_combo.currentData()
+        if source and target:
+            self.lc_pair_changed.emit(source, target)
 
     def _on_mode_toggled(self, lc_checked: bool):
         mode = AppMode.LIVE_CAPTIONS if lc_checked else AppMode.SCREEN_OCR
