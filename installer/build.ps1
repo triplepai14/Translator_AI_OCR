@@ -6,6 +6,9 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 Set-Location $root
 
+# Refresh installed metadata so --copy-metadata picks up the current version
+& ".venv\Scripts\python.exe" -m pip install --quiet -e . | Out-Null
+
 & ".venv\Scripts\pyinstaller.exe" --noconfirm --clean --windowed `
     --name TranslatorAIOCR `
     --icon "installer\icon.ico" `

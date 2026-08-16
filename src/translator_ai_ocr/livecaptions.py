@@ -90,6 +90,7 @@ class LiveCaptionsReader:
     def __init__(self):
         self._auto = None
         self._win = None
+        self._hwnd = 0
         self._text_ctrl = None
 
     def _ensure_auto(self):
@@ -101,18 +102,35 @@ class LiveCaptionsReader:
     def connect(self) -> str:
         """Locate the Live Captions window and transcript element.
 
+        Uses Win32 FindWindow to locate the window (reliable in frozen
+        builds where UIA root enumeration can miss windows), then attaches
+        a UIA control from the native handle.
+
         Returns:
             One of OK, NOT_RUNNING, NEEDS_SETUP.
         """
         self._ensure_auto()
         auto = self._auto
 
-        win = auto.WindowControl(searchDepth=1, ClassName=WINDOW_CLASS)
-        if not win.Exists(1, 0.2):
+        import ctypes
+
+        hwnd = ctypes.windll.user32.FindWindowW(WINDOW_CLASS, None)
+        if not hwnd:
+            self._win = None
+            self._text_ctrl = None
+            return self.NOT_RUNNING
+        try:
+            win = auto.ControlFromHandle(hwnd)
+        except Exception:
+            self._win = None
+            self._text_ctrl = None
+            return self.NOT_RUNNING
+        if win is None:
             self._win = None
             self._text_ctrl = None
             return self.NOT_RUNNING
         self._win = win
+        self._hwnd = hwnd
 
         text_ctrl = win.TextControl(AutomationId=CAPTIONS_TEXT_ID)
         if text_ctrl.Exists(1, 0.2):
@@ -144,10 +162,12 @@ class LiveCaptionsReader:
             # Transcript element may appear after audio starts
             if self._win is None:
                 return None
+            import ctypes
+
+            if not ctypes.windll.user32.IsWindow(self._hwnd):
+                self._win = None
+                return None
             try:
-                if not self._win.Exists(0, 0):
-                    self._win = None
-                    return None
                 cand = self._win.TextControl(AutomationId=CAPTIONS_TEXT_ID)
                 if cand.Exists(0, 0):
                     self._text_ctrl = cand

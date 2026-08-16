@@ -62,10 +62,15 @@ class LiveCaptionsWorker(QObject):
             self.status_changed.emit(f"error:{e}")
             return
 
-        import uiautomation as auto
+        try:
+            import uiautomation as auto
 
-        with auto.UIAutomationInitializerInThread():
-            self._poll_loop()
+            with auto.UIAutomationInitializerInThread():
+                self._poll_loop()
+        except Exception as e:
+            logger.error("live captions worker crashed", error=repr(e))
+            self.status_changed.emit(f"error:{e}")
+            return
 
         self.status_changed.emit("stopped")
         logger.debug("live captions worker stopped")
