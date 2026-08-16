@@ -117,7 +117,7 @@ class TranslatorApp:
         messages = {
             "loading_model": "Loading translation model... (first run downloads ~2.4GB)",
             "connecting": "Looking for the Live Captions window...",
-            "needs_setup": 'Live Captions needs setup: click "Yes, continue" on its window',
+            "needs_setup": 'Live Captions needs setup: click "Yes, continue" / "Continue" on its window',
             "running": "",  # transcript will replace this
             "stopped": "",
         }
