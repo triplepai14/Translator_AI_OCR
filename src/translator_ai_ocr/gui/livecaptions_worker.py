@@ -83,6 +83,8 @@ class LiveCaptionsWorker(QObject):
 
     def _report_download_progress(self, stop_event: threading.Event):
         """Emit download percentage while the engine loads (first run)."""
+        last_done = -1
+        last_change = time.monotonic()
         while not stop_event.wait(1.0):
             try:
                 progress = self._engine.download_progress()
@@ -91,6 +93,14 @@ class LiveCaptionsWorker(QObject):
             if not progress:
                 return
             done, total = progress
+            now = time.monotonic()
+            if done != last_done:
+                last_done = done
+                last_change = now
+            if now - last_change > 90:
+                # No bytes for 90s: likely a network problem
+                self.status_changed.emit("download_stalled")
+                continue
             pct = min(99, done * 100 // max(1, total))
             self.status_changed.emit(f"downloading:{pct}:{done // 1048576}:{total // 1048576}")
 

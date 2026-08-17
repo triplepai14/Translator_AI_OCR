@@ -96,6 +96,10 @@ def configure(level: str = "INFO", debug: bool = False) -> None:
 
     os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
     os.environ.setdefault("TQDM_DISABLE", "1")
+    # Use plain HTTP downloads instead of the Xet backend: Xet stages chunks
+    # in a separate cache (breaking our download progress display) and can
+    # stall on some networks. Plain downloads are resumable and visible.
+    os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
     if sys.stdout is None:
         sys.stdout = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
     if sys.stderr is None:

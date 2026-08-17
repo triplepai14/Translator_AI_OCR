@@ -168,6 +168,12 @@ class TranslatorApp:
             set_live_captions_visible(True)
         elif status == "running" and not self._config.show_live_captions:
             set_live_captions_visible(False)
+        if status == "download_stalled":
+            self._caption.set_status(
+                "Download stalled - check your internet connection, or switch to the "
+                "Google engine in Settings (⚙) which needs no download."
+            )
+            return
         if status.startswith("downloading:"):
             try:
                 pct, done_mb, total_mb = (int(x) for x in status.split(":")[1:4])

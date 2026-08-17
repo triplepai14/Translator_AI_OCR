@@ -1,8 +1,8 @@
-; Inno Setup script for Translator AI OCR
+﻿; Inno Setup script for Translator AI OCR
 ; Build: iscc installer\setup.iss  (after PyInstaller has produced dist\TranslatorAIOCR)
 
 #define MyAppName "Translator AI OCR"
-#define MyAppVersion "1.2.3"
+#define MyAppVersion "1.2.4"
 #define MyAppExeName "TranslatorAIOCR.exe"
 
 [Setup]
