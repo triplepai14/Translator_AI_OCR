@@ -168,6 +168,19 @@ class TranslatorApp:
             set_live_captions_visible(True)
         elif status == "running" and not self._config.show_live_captions:
             set_live_captions_visible(False)
+        if status.startswith("downloading:"):
+            try:
+                pct, done_mb, total_mb = (int(x) for x in status.split(":")[1:4])
+                if pct >= 99:
+                    self._caption.set_status("Preparing translation model... (almost done)")
+                else:
+                    self._caption.set_status(
+                        f"Downloading translation model... {pct}% ({done_mb}/{total_mb} MB) - "
+                        "one-time only. Tip: Google engine in Settings (⚙) needs no download."
+                    )
+            except ValueError:
+                pass
+            return
         if status.startswith("error:"):
             self._caption.set_status(f"Error: {status[6:][:120]}")
         elif messages.get(status):
@@ -189,7 +202,7 @@ class TranslatorApp:
 
     def _on_ocr_status(self, status: str):
         if status == "loading":
-            self._caption.set_status("Loading OCR/translation models...")
+            self._caption.set_status("Loading OCR/translation models... (first run downloads up to ~1.2GB)")
         elif status == "ready":
             self._caption.set_status("Models ready - open Settings (⚙) and pick a window")
         elif status == "capturing":

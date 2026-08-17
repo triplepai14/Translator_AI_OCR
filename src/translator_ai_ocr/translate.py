@@ -1,4 +1,4 @@
-"""Offline translation module (Sugoi V4 ja->en, NLLB-200 en->ja)."""
+﻿"""Offline translation module (Sugoi V4 ja->en, NLLB-200 en->ja)."""
 
 import os
 import sys
@@ -28,6 +28,7 @@ MODEL_SPECS = {
         "source_token": None,
         "target_token": None,
         "compute_type": None,  # model is already quantized appropriately
+        "approx_size": 1_200_000_000,
     },
     "en-ja": {
         "repo_id": "entai2965/nllb-200-distilled-600M-ctranslate2",
@@ -36,6 +37,7 @@ MODEL_SPECS = {
         "source_token": "eng_Latn",
         "target_token": "jpn_Jpan",
         "compute_type": "int8",  # model ships float32 (2.4GB); int8 keeps RAM/CPU sane
+        "approx_size": 2_500_000_000,
     },
     "en-th": {
         "repo_id": "entai2965/nllb-200-distilled-600M-ctranslate2",
@@ -44,6 +46,7 @@ MODEL_SPECS = {
         "source_token": "eng_Latn",
         "target_token": "tha_Thai",
         "compute_type": "int8",
+        "approx_size": 2_500_000_000,
     },
     "ja-th": {
         "repo_id": "entai2965/nllb-200-distilled-600M-ctranslate2",
@@ -52,6 +55,7 @@ MODEL_SPECS = {
         "source_token": "jpn_Jpan",
         "target_token": "tha_Thai",
         "compute_type": "int8",
+        "approx_size": 2_500_000_000,
     },
 }
 
@@ -80,6 +84,23 @@ def _get_short_path(path: Path) -> str:
         if ctypes.windll.kernel32.GetShortPathNameW(str(path), buf, 512):
             return buf.value
     return str(path)
+
+
+def cache_size_bytes(repo_id: str) -> int:
+    """Approximate bytes downloaded so far for a repo in the HF cache.
+
+    Counts partially downloaded (.incomplete) blobs too, so it can be used
+    for download progress reporting.
+    """
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE
+
+        folder = Path(HF_HUB_CACHE) / f"models--{repo_id.replace('/', '--')}"
+        if not folder.exists():
+            return 0
+        return sum(f.stat().st_size for f in folder.rglob("*") if f.is_file())
+    except OSError:
+        return 0
 
 
 def _validate_model_files(model_path: Path, required_files: list[str]) -> bool:

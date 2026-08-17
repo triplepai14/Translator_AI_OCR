@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 import requests
 
 from . import log
-from .translate import DEFAULT_CACHE_SIZE, TranslationCache, Translator
+from .translate import DEFAULT_CACHE_SIZE, MODEL_SPECS, TranslationCache, Translator, cache_size_bytes
 
 logger = log.get_logger()
 
@@ -56,13 +56,22 @@ class OfflineEngine(TranslationEngine):
 
     def __init__(self, source: str, target: str):
         super().__init__(source, target)
-        self._translator = Translator(direction=f"{source}-{target}")
+        self._direction = f"{source}-{target}"
+        self._translator = Translator(direction=self._direction)
 
     def load(self) -> None:
         self._translator.load()
 
     def translate_text(self, text: str) -> str:
         return self._translator.translate(text)[0]
+
+    def download_progress(self) -> tuple[int, int] | None:
+        """Return (downloaded_bytes, approx_total_bytes) for the model."""
+        spec = MODEL_SPECS[self._direction]
+        total = spec.get("approx_size")
+        if not total:
+            return None
+        return cache_size_bytes(spec["repo_id"]), total
 
 
 class GoogleEngine(TranslationEngine):
@@ -218,6 +227,10 @@ class CachedEngine:
     @property
     def requires_download(self) -> bool:
         return self._engine.requires_download
+
+    def download_progress(self) -> tuple[int, int] | None:
+        fn = getattr(self._engine, "download_progress", None)
+        return fn() if fn else None
 
     def load(self) -> None:
         self._engine.load()

@@ -53,14 +53,20 @@ class LiveCaptionsWorker(QObject):
         logger.debug("live captions worker starting", source=self._source_lang)
 
         # Prepare the engine (offline engines may download models on first use)
+        progress_stop = threading.Event()
         if self._engine.requires_download:
             self.status_changed.emit("loading_model")
+            threading.Thread(
+                target=self._report_download_progress, args=(progress_stop,), daemon=True
+            ).start()
         try:
             self._engine.load()
         except Exception as e:
             logger.error("failed to prepare translation engine", error=str(e))
             self.status_changed.emit(f"error:{e}")
             return
+        finally:
+            progress_stop.set()
 
         try:
             import uiautomation as auto
@@ -74,6 +80,19 @@ class LiveCaptionsWorker(QObject):
 
         self.status_changed.emit("stopped")
         logger.debug("live captions worker stopped")
+
+    def _report_download_progress(self, stop_event: threading.Event):
+        """Emit download percentage while the engine loads (first run)."""
+        while not stop_event.wait(1.0):
+            try:
+                progress = self._engine.download_progress()
+            except Exception:
+                return
+            if not progress:
+                return
+            done, total = progress
+            pct = min(99, done * 100 // max(1, total))
+            self.status_changed.emit(f"downloading:{pct}:{done // 1048576}:{total // 1048576}")
 
     def _poll_loop(self):
         reader = LiveCaptionsReader()

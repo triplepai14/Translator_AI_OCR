@@ -2,7 +2,7 @@
 ; Build: iscc installer\setup.iss  (after PyInstaller has produced dist\TranslatorAIOCR)
 
 #define MyAppName "Translator AI OCR"
-#define MyAppVersion "1.2.2"
+#define MyAppVersion "1.2.3"
 #define MyAppExeName "TranslatorAIOCR.exe"
 
 [Setup]
