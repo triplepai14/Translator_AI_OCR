@@ -144,10 +144,14 @@ class TranslatorApp:
             self._ocr.load_models()
 
     def _stop_pipelines(self):
+        import gc
+
         if self._lc_worker is not None:
             self._lc_worker.stop()
             self._lc_worker = None
-        self._ocr.stop_capture()
+        # Fully release Screen OCR models when leaving that mode (frees ~500MB+)
+        self._ocr.shutdown()
+        gc.collect()
 
     # ---------- status handlers ----------
 

@@ -89,6 +89,18 @@ def configure(level: str = "INFO", debug: bool = False) -> None:
         log_dir.mkdir(parents=True, exist_ok=True)
         stream = open(log_dir / "app.log", "a", encoding="utf-8", buffering=1)  # noqa: SIM115
 
+    # Third-party libraries (tqdm/huggingface progress bars, warnings) write
+    # to sys.stdout/sys.stderr directly and crash when those are None in
+    # windowed builds. Give them a safe sink and disable progress bars.
+    import os
+
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    os.environ.setdefault("TQDM_DISABLE", "1")
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
+
     structlog.configure(
         processors=processors,
         wrapper_class=structlog.make_filtering_bound_logger(getattr(logging, level.upper(), logging.INFO)),

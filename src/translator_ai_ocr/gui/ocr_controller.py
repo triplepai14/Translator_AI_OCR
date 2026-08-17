@@ -37,12 +37,7 @@ class OcrController(QObject):
         self._inplace_overlay = inplace_overlay
         self._capture: WindowCapture | None = None
         self._capturing = False
-
-        self._worker = ProcessWorker()
-        self._worker.text_ready.connect(self._on_text_ready)
-        self._worker.regions_ready.connect(self._on_regions_ready)
-        self._worker.models_ready.connect(lambda: self.status_changed.emit("ready"))
-        self._worker.models_failed.connect(lambda msg: self.status_changed.emit(f"error:{msg}"))
+        self._worker: ProcessWorker | None = None
 
         self._timer = QTimer()
         self._timer.timeout.connect(self._capture_and_process)
@@ -57,10 +52,24 @@ class OcrController(QObject):
 
     def load_models(self):
         """Start the worker thread (loads models in background)."""
+        if self._worker is None:
+            self._worker = ProcessWorker()
+            self._worker.text_ready.connect(self._on_text_ready)
+            self._worker.regions_ready.connect(self._on_regions_ready)
+            self._worker.models_ready.connect(lambda: self.status_changed.emit("ready"))
+            self._worker.models_failed.connect(lambda msg: self.status_changed.emit(f"error:{msg}"))
         self.status_changed.emit("loading")
         self._worker.set_mode(self._config.overlay_mode)
         self._worker.set_direction(self._config.ocr_direction)
         self._worker.start(self._config.ocr_confidence)
+
+    def shutdown(self):
+        """Stop capture and release the OCR/translation models (frees RAM)."""
+        self.stop_capture()
+        if self._worker is not None:
+            self._worker.stop()
+            self._worker = None
+            logger.info("screen OCR models released")
 
     def list_windows(self) -> list[dict]:
         return WindowCapture.list_windows()
@@ -107,7 +116,8 @@ class OcrController(QObject):
         return self._capturing
 
     def set_overlay_mode(self, mode: OverlayMode):
-        self._worker.set_mode(mode)
+        if self._worker is not None:
+            self._worker.set_mode(mode)
         if mode == OverlayMode.BANNER:
             self._inplace_overlay.clear_regions()
             self._inplace_overlay.hide()
@@ -115,10 +125,12 @@ class OcrController(QObject):
             self._inplace_overlay.show()
 
     def set_direction(self, direction: str):
-        self._worker.set_direction(direction)
+        if self._worker is not None:
+            self._worker.set_direction(direction)
 
     def set_confidence(self, value: float):
-        self._worker.set_confidence_threshold(value)
+        if self._worker is not None:
+            self._worker.set_confidence_threshold(value)
 
     # ---------- pipeline (ported from interpreter-v2) ----------
 
@@ -163,7 +175,8 @@ class OcrController(QObject):
         self._last_frame_sample = sample
         self._last_process_time = now
 
-        self._worker.submit_frame(frame, sample)
+        if self._worker is not None:
+            self._worker.submit_frame(frame, sample)
 
     def _content_moved(self, old_sample, new_sample) -> bool:
         if old_sample is None or new_sample is None:
