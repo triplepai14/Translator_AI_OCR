@@ -322,12 +322,22 @@ class TranslatorApp:
         )
 
     def _quit(self):
-        self._stop_pipelines()
-        set_live_captions_visible(True)  # don't leave Live Captions stranded off-screen
-        self._caption.save_geometry()
-        self._config.save()
+        import os
+        import threading
+
+        try:
+            self._stop_pipelines()
+            set_live_captions_visible(True)  # don't leave Live Captions stranded off-screen
+            self._caption.save_geometry()
+            self._config.save()
+        except Exception as e:
+            logger.error("error during shutdown", error=str(e))
         self._tray.hide()
         self._app.quit()
+        # Non-daemon library threads (e.g. an in-progress model download)
+        # can keep the interpreter alive after the event loop exits - make
+        # sure the process really terminates.
+        threading.Timer(1.5, lambda: os._exit(0)).start()
 
 
 def run() -> int:
